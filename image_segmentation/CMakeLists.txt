@@ -19,7 +19,9 @@ find_package(catkin REQUIRED COMPONENTS
  
 set(OpenCV_DIR /opt/ros/kinetic/include)    
 find_package(OpenCV REQUIRED)  
-  
+
+
+
 catkin_package(CATKIN_DEPENDS  
 roscpp  
 std_msgs  
@@ -28,10 +30,15 @@ sensor_msgs
   
 include_directories(  
 include  
-${OpenCV_INCLUDE_DIRS}  
+${OpenCV_INCLUDE_DIRS}
 ${catkin_INCLUDE_DIRS}  
 )  
-  
+
+find_package(PCL 1.3 REQUIRED COMPONENTS common io)
+include_directories(${PCL_INCLUDE_DIRS})
+link_directories(${PCL_LIBRARY_DIRS})
+add_definitions(${PCL_DEFINITIONS}) 
+
   
 ### find files  
   
@@ -46,7 +53,7 @@ ${SOURCE_FILES}
 target_link_libraries(depth_seg  
 ${catkin_LIBRARIES}  
 ${OpenCV_LIBRARIES}  
-  
+${PCL_LIBRARIES} 
 )  
 
 
