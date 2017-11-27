@@ -13,6 +13,9 @@
 #include <pcl/PCLPointCloud2.h>
 #include <pcl/conversions.h>
 #include <pcl_ros/transforms.h>
+#include <px4_autonomy/Velocity.h>
+#include <px4_autonomy/Position.h> 
+#include <std_msgs/Float32.h>
 
 using namespace std;
 using namespace cv;
@@ -20,8 +23,8 @@ using namespace Eigen;
 
 #define WIDTH 640
 #define HEIGHT 360
-#define STEP 10
-#define VALID_THRE 40
+#define STEP 5
+#define VALID_THRE 10
 
 Mat dep_frame(WIDTH,HEIGHT,CV_16UC1);
 MatrixXf depth_mtr(HEIGHT, WIDTH);
@@ -37,7 +40,12 @@ float cx = 319.5;
 float cy = 239.5;
 float factor = 5000.0;
 
-Vector4f &plane_ransac(MatrixXf &square, Vector4f &paras, Vector3f &plane_vec, Vector3f &plane_point, int &pixel_counter, int iterations = 10, float dist_filter = 0.2f, float ratio = 1.f) //Use RANSAC to fit planes. MatrixXf square(STEP*STEP, 3), (X,Y,Z) for each pixel
+Vector3f fly_direction;
+Vector3f control_direction;
+Vector3f current_position;
+std_msgs::Float32 obstacle_dist_result;
+
+Vector4f &plane_ransac(MatrixXf &square, Vector4f &paras, Vector3f &plane_vec, Vector3f &plane_point, int &pixel_counter, int iterations = 5, float dist_filter = 0.2f, float ratio = 1.f) //Use RANSAC to fit planes. MatrixXf square(STEP*STEP, 3), (X,Y,Z) for each pixel
 {
     int n1, n2, n3;
     VectorXf dist(pixel_counter);
@@ -121,7 +129,7 @@ void chatterCallback_depth(const sensor_msgs::PointCloud2& cloud_msg)
     {
         for(int j=0; j< WIDTH; j++)
         {
-            depth_mtr(i,j) = (int)cloud_pcl->points[i*WIDTH + j].z * factor;
+            depth_mtr(i,j) = (float)cloud_pcl->points[i*WIDTH + j].z * factor;
         }
     }
     
@@ -141,12 +149,53 @@ void chatterCallback_depth(const sensor_msgs::PointCloud2& cloud_msg)
 //     cout<<pcl_pc2->points[0]<<endl;
 // }
 
+void chatterCallback_body(const px4_autonomy::Velocity& msg)
+{
+    fly_direction(0) = msg.x;
+    fly_direction(1) = msg.y;
+    fly_direction(2) = msg.z;
+}
+
+void chatterCallback_ps2(const px4_autonomy::Velocity& msg)
+{
+    control_direction(0) = msg.x;
+    control_direction(1) = msg.y;
+    control_direction(2) = msg.z;
+}
+
+void chatterCallback_pose(const px4_autonomy::Position& msg)
+{
+    current_position(0) = msg.x;
+    current_position(1) = msg.y;
+    current_position(2) = msg.z;
+}
+
+float transvection(Vector3f &x, Vector3f &y)
+{
+    return x(0)*y(0) + x(1)*y(1) + x(2)*y(2);
+}
+
+float vector_length(Vector3f &x)
+{
+    return sqrt(x(0)*x(0) + x(1)*x(1) + x(2)*x(2));
+}
+
+float angle_between_vectors(Vector3f &x, Vector3f &y)
+{
+    return acos(transvection(x,y) / vector_length(x) / vector_length(y));
+}
+
 int main(int argc, char** argv)
 {
 	ros::init(argc, argv, "depth_seg");
     ros::NodeHandle nh;
 
     ros::Subscriber depth_sub = nh.subscribe("/camera/depth/points", 1, chatterCallback_depth);
+    ros::Subscriber local_pose_sub = nh.subscribe("/px4/pose", 1,chatterCallback_pose);
+    ros::Subscriber body_vel_sub = nh.subscribe("/px4/body_vel", 1,chatterCallback_body);
+    ros::Subscriber ps2_vel_sub = nh.subscribe("/px4/ps2_vel", 1,chatterCallback_ps2);
+
+    ros::Publisher obstacle_dist_pub = nh.advertise<std_msgs::Float32>("/obstacle_dist", 1); 
 
     //dep_frame=imread("/home/clarence/Dataset/rgbd_dataset_freiburg3_sitting_static/depth/1341845688.562015.png",CV_LOAD_IMAGE_ANYDEPTH);
 
@@ -174,7 +223,7 @@ int main(int argc, char** argv)
 
             MatrixXf planes_mtr(square_num, 4); //to store plane parameters
             MatrixXf planes_vec_mtr(square_num, 3); 
-            MatrixXf central_mtr(square_num, 3); //central point position for each square fitting plane
+            MatrixXf central_mtr(square_num, 3); //central point position for each square fitting plane, (x,y,z)=(front, left, up)
 
             for(int i = 0; i < square_nw; i++) //divide squares
             {
@@ -221,6 +270,45 @@ int main(int argc, char** argv)
                     
                 }
             }
+
+            float min_obstacle_dist = 100.0;
+            Vector3f obstacle_direction;
+            obstacle_direction(0) = 1;
+            obstacle_direction(1) = 1;
+            obstacle_direction(2) = 1;
+
+            for(int i = 0; i < square_num; i++)
+            {
+                central_mtr(i, 1) = central_mtr(i, 1) * 3;
+                if(central_mtr(i, 2) > 0.3 && -central_mtr(i, 1) > -current_position(2) + 0.5) //do not count ground
+                {
+                    Vector3f direction;
+                    direction(0) = central_mtr(i,2);
+                    direction(1) = -central_mtr(i,0);
+                    direction(2) = -central_mtr(i,1);
+
+                    float theta0 = angle_between_vectors(fly_direction, control_direction);
+                    Vector3f middle_direction = (fly_direction + control_direction) / 2.f;
+
+                    float delt_theta = 0.5;
+                    if(angle_between_vectors(fly_direction, direction) + angle_between_vectors(control_direction, direction) < theta0 + delt_theta 
+                        && transvection(middle_direction, direction) > 0) //obstacle judge
+                    {
+                        float dist = vector_length(direction);
+                        if(min_obstacle_dist >  dist && dist > 0.5)
+                        {
+                            min_obstacle_dist = dist;
+                            obstacle_direction = direction;
+                        }
+                            
+                    }
+                }
+            }
+            cout<<obstacle_direction<<"**"<<endl;
+            obstacle_dist_result.data = min_obstacle_dist;
+            obstacle_dist_pub.publish(obstacle_dist_result);
+
+
             //cout<< planes_vec_mtr;
 
             /*display*/
