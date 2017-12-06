@@ -5,7 +5,9 @@
 #include <cv_bridge/cv_bridge.h>
 #include <iostream>
 #include <math.h>
+#include <Eigen/Core>  
 #include <Eigen/Dense>
+#include <Eigen/Geometry>  
 #include <pcl/filters/voxel_grid.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -34,15 +36,16 @@ int flag = 0;
 //sensor_msgs::ImagePtr msg;
 
 //camera parameters
-float fx = 525.0;
-float fy = 525.0;
-float cx = 319.5;
-float cy = 239.5;
+float fx = 205.47;
+float fy = 205.47;
+float cx = 320.5;
+float cy = 180.5;
 float factor = 5000.0;
 
 Vector3f fly_direction;
 Vector3f control_direction;
 Vector3f current_position;
+Vector3f current_posture; //yaw, roll, pitch
 std_msgs::Float32 obstacle_dist_result;
 
 Vector4f &plane_ransac(MatrixXf &square, Vector4f &paras, Vector3f &plane_vec, Vector3f &plane_point, int &pixel_counter, int iterations = 5, float dist_filter = 0.2f, float ratio = 1.f) //Use RANSAC to fit planes. MatrixXf square(STEP*STEP, 3), (X,Y,Z) for each pixel
@@ -168,6 +171,9 @@ void chatterCallback_pose(const px4_autonomy::Position& msg)
     current_position(0) = msg.x;
     current_position(1) = msg.y;
     current_position(2) = msg.z;
+    current_posture(0) = msg.yaw;
+    current_posture(1) = msg.roll;
+    current_posture(2) = msg.pitch;
 }
 
 float transvection(Vector3f &x, Vector3f &y)
@@ -231,7 +237,7 @@ int main(int argc, char** argv)
                 {
                     int start_x = i*STEP;
                     int start_y = j*STEP;
-                    MatrixXf square(STEP*STEP, 3); //(X,Y,Z) for each pixel
+                    MatrixXf square(STEP*STEP, 3); //(X,Y,Z) for each pixel, X is rightside, Y is down side and Z is front side(depth).
                     int pixel_counter = 0; 
 
                     for(int x = start_x; x < start_x+STEP; x++)
@@ -271,22 +277,57 @@ int main(int argc, char** argv)
                 }
             }
 
+           
+
             float min_obstacle_dist = 100.0;
             Vector3f obstacle_direction;
             obstacle_direction(0) = 1;
-            obstacle_direction(1) = 1;
-            obstacle_direction(2) = 1;
+            obstacle_direction(1) = 0;
+            obstacle_direction(2) = 0;
+
+            /*Add pose crrection here*/
+            Eigen::Vector3f ea0(current_posture(2), 0.0, current_posture(1));  
+            Eigen::Matrix3f R;  
+            R = Eigen::AngleAxisf(ea0[0], Eigen::Vector3f::UnitX())  
+                * Eigen::AngleAxisf(ea0[1], Eigen::Vector3f::UnitY())  
+                * Eigen::AngleAxisf(ea0[2], Eigen::Vector3f::UnitZ()); 
+
+            central_mtr = (R * central_mtr.transpose()).transpose();
+            planes_vec_mtr = (R * planes_vec_mtr.transpose()).transpose();
+            /*for(int i = 0; i < square_nw * square_nh; i++)
+            {
+                Vector3f central_vec = central_mtr.row(i);
+                Vector3f plane_vec = planes_vec_mtr.row(i);
+
+                central_vec = R * central_vec;
+                plane_vec = R * plane_vec;
+
+                central_mtr.row(i) = central_vec;
+                planes_vec_mtr.row(i) = plane_vec;
+            }*/
+
+            //central_mtr = central_mtr * R;
+            //planes_vec_mtr = planes_vec_mtr * R;
+
+            /*************************/
+
+             /*For test*/
+            //cout<<central_mtr.row(320)<<endl<<"****"<<endl;
+            //central_mtr(320, 2) = 3.0;
+
+            /****/
 
             for(int i = 0; i < square_num; i++)
             {
                 central_mtr(i, 1) = central_mtr(i, 1) * 3;
-                if(central_mtr(i, 2) > 0.3 && -central_mtr(i, 1) > -current_position(2) + 0.5) //do not count ground
-                {
-                    Vector3f direction;
-                    direction(0) = central_mtr(i,2);
-                    direction(1) = -central_mtr(i,0);
-                    direction(2) = -central_mtr(i,1);
+                Vector3f direction;
+                direction(0) = central_mtr(i,2);
+                direction(1) = -central_mtr(i,0);
+                direction(2) = -central_mtr(i,1);
 
+                if(central_mtr(i, 2) > 1.2 && -central_mtr(i, 1) > -current_position(2) + 0.5) //do not count ground
+                {
+                    
                     float theta0 = angle_between_vectors(fly_direction, control_direction);
                     Vector3f middle_direction = (fly_direction + control_direction) / 2.f;
 
@@ -303,8 +344,17 @@ int main(int argc, char** argv)
                             
                     }
                 }
+                else if(central_mtr(i, 2) > 0.6 && -central_mtr(i, 1) > -current_position(2) + 0.5 && fly_direction(0) > 0)//do not count ground and slades
+                {
+                    float dist = vector_length(direction);
+                    if(min_obstacle_dist >  dist && dist > 0.5)
+                    {
+                        min_obstacle_dist = dist;
+                    }
+                }
+
             }
-            cout<<obstacle_direction<<"**"<<endl;
+            //cout<<obstacle_direction<<"**"<<endl;
             obstacle_dist_result.data = min_obstacle_dist;
             obstacle_dist_pub.publish(obstacle_dist_result);
 
