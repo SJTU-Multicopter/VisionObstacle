@@ -186,9 +186,15 @@ float vector_length(Vector3f &x)
     return sqrt(x(0)*x(0) + x(1)*x(1) + x(2)*x(2));
 }
 
+float acos_near(float x)
+{
+    return 1.5708 * (1.0 - x);
+}
+
 float angle_between_vectors(Vector3f &x, Vector3f &y)
 {
-    return acos(transvection(x,y) / vector_length(x) / vector_length(y));
+    //return acos(transvection(x,y) / vector_length(x) / vector_length(y));
+    return acos_near(transvection(x,y) / vector_length(x) / vector_length(y));
 }
 
 int main(int argc, char** argv)
@@ -205,6 +211,13 @@ int main(int argc, char** argv)
 
     //dep_frame=imread("/home/clarence/Dataset/rgbd_dataset_freiburg3_sitting_static/depth/1341845688.562015.png",CV_LOAD_IMAGE_ANYDEPTH);
 
+    square_nw = WIDTH / STEP;
+    square_nh = HEIGHT / STEP;
+    square_num = square_nw * square_nh;
+    int slade_square_thred = square_nh * 0.2; 
+    int body_square_min = square_nw * 0.15;
+    int body_square_max = square_nw - body_square_min;
+
     ros::Rate loop_rate(20);
     while(nh.ok())
     {
@@ -213,9 +226,7 @@ int main(int argc, char** argv)
             //imshow("dep",dep_frame);
            // waitKey();
 
-            square_nw = WIDTH / STEP;
-            square_nh = HEIGHT / STEP;
-            square_num = square_nw * square_nh;
+            
 
             //Mat to Eigen Matrix
 
@@ -312,48 +323,66 @@ int main(int argc, char** argv)
             /*************************/
 
              /*For test*/
-            //cout<<central_mtr.row(320)<<endl<<"****"<<endl;
-            //central_mtr(320, 2) = 3.0;
+            // cout<<central_mtr.row(320)<<endl<<"****"<<endl;
+            // cout<<central_mtr.row(321)<<endl<<"****"<<endl;
+            // central_mtr(320, 2) = 5.0;
+            // central_mtr(321, 2) = 2.0;
 
             /****/
 
-            for(int i = 0; i < square_num; i++)
+            /**Obstcle distance calculation**/
+
+            if(fly_direction(0) < -0.1)
             {
-                central_mtr(i, 1) = central_mtr(i, 1) * 3;
-                Vector3f direction;
-                direction(0) = central_mtr(i,2);
-                direction(1) = -central_mtr(i,0);
-                direction(2) = -central_mtr(i,1);
-
-                if(central_mtr(i, 2) > 1.2 && -central_mtr(i, 1) > -current_position(2) + 0.5) //do not count ground
+                min_obstacle_dist = 100;
+            }
+            else
+            {
+                for(int i = 0; i < square_num; i++)
                 {
-                    
-                    float theta0 = angle_between_vectors(fly_direction, control_direction);
-                    Vector3f middle_direction = (fly_direction + control_direction) / 2.f;
+                    central_mtr(i, 1) = central_mtr(i, 1) * 3;
+                    Vector3f direction;
+                    direction(0) = central_mtr(i,2);
+                    direction(1) = -central_mtr(i,0);
+                    direction(2) = -central_mtr(i,1);
 
-                    float delt_theta = 0.5;
-                    if(angle_between_vectors(fly_direction, direction) + angle_between_vectors(control_direction, direction) < theta0 + delt_theta 
-                        && transvection(middle_direction, direction) > 0) //obstacle judge
+                    if(central_mtr(i, 2) > 1.5 && -central_mtr(i, 1) > -current_position(2) + 0.3) //do not count ground
+                    {
+                        
+                        float theta0 = angle_between_vectors(fly_direction, control_direction);
+                        Vector3f middle_direction = (fly_direction + control_direction) / 2.f;
+
+                        float delt_theta = 0.5;
+                        if(angle_between_vectors(fly_direction, direction) + angle_between_vectors(control_direction, direction) < theta0 + delt_theta 
+                            && transvection(middle_direction, direction) > 0) //obstacle judge
+                        {
+                            float dist = vector_length(direction);
+                            if(min_obstacle_dist >  dist && dist > 0.3)
+                            {
+                                min_obstacle_dist = dist;
+                                obstacle_direction = direction;
+                            }
+                                
+                        }
+                    }
+                    else if(central_mtr(i, 2) > 0.6 && -central_mtr(i, 1) > -current_position(2) + 0.3)//do not count ground and slades 
                     {
                         float dist = vector_length(direction);
                         if(min_obstacle_dist >  dist && dist > 0.5)
                         {
                             min_obstacle_dist = dist;
-                            obstacle_direction = direction;
                         }
-                            
                     }
-                }
-                else if(central_mtr(i, 2) > 0.6 && -central_mtr(i, 1) > -current_position(2) + 0.5 && fly_direction(0) > 0)//do not count ground and slades
-                {
-                    float dist = vector_length(direction);
-                    if(min_obstacle_dist >  dist && dist > 0.5)
+                    else if(central_mtr(i, 2) > 0.1 && -central_mtr(i, 1) > -current_position(2) + 0.3 
+                            && i%square_nh > slade_square_thred && i%square_nw > body_square_min && i%square_nw < body_square_max) //handle slades and body
                     {
-                        min_obstacle_dist = dist;
+                        min_obstacle_dist = 0.5;
                     }
-                }
 
+                }
             }
+
+            
             //cout<<obstacle_direction<<"**"<<endl;
             obstacle_dist_result.data = min_obstacle_dist;
             obstacle_dist_pub.publish(obstacle_dist_result);
