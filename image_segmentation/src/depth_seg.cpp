@@ -29,6 +29,7 @@ using namespace Eigen;
 #define VALID_THRE 10
 
 Mat dep_frame(WIDTH,HEIGHT,CV_16UC1);
+MatrixXf depth_mtr_raw(HEIGHT, WIDTH);
 MatrixXf depth_mtr(HEIGHT, WIDTH);
 
 int square_nw, square_nh, square_num;
@@ -120,26 +121,39 @@ void drawArrow(cv::Mat& img, cv::Point pStart, cv::Point pEnd, int len, int alph
 }
 
 
+bool is_nan(double dVal)
+{
+    if (dVal==dVal)
+        return false;
+    return true;
+}
+
 void chatterCallback_depth(const sensor_msgs::PointCloud2& cloud_msg)
 {
     //pcl::PCLPointCloud2* cloud = new pcl::PCLPointCloud2;
    // pcl_conversions::toPCL(*cloud_msg, *cloud);
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_pcl(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::fromROSMsg(cloud_msg, *cloud_pcl);
-
-    for(int i = 0; i < HEIGHT; i++)
+    //if(flag == 0)
     {
-        for(int j=0; j< WIDTH; j++)
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_pcl(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::fromROSMsg(cloud_msg, *cloud_pcl);
+
+        for(int i = 0; i < HEIGHT; i++)
         {
-            depth_mtr(i,j) = (float)cloud_pcl->points[i*WIDTH + j].z * factor;
+            for(int j=0; j< WIDTH; j++)
+            {
+                if(is_nan(cloud_pcl->points[i*WIDTH + j].z))
+                    depth_mtr_raw(i,j) = 100.0;
+                else 
+                    depth_mtr_raw(i,j) = (float)cloud_pcl->points[i*WIDTH + j].z * factor;
+            }
         }
-    }
-    
-    flag = 1;
-    // for(int i = 0; i < 640*360; i++)
-    //     cout<<cloud_pcl->points[i].z<<" ";
-    //cout<<"*********" << endl;
+        
+        flag = 1;
+        // for(int i = 0; i < 640*360; i++)
+        //     cout<<cloud_pcl->points[i].z<<" ";
+        //cout<<"*********" << endl;
+    }   
 }
 
 //  void chatterCallback_depth(const boost::shared_ptr<const sensor_msgs::PointCloud2>& input){
@@ -219,9 +233,13 @@ int main(int argc, char** argv)
     int body_square_max = square_nw - body_square_min;
 
     ros::Rate loop_rate(20);
+    namedWindow("disp_img");
+
     while(nh.ok())
     {
        // if(!dep_frame.empty()) {
+        
+        depth_mtr = depth_mtr_raw;
         if(flag > 0) {    
             //imshow("dep",dep_frame);
            // waitKey();
@@ -258,6 +276,7 @@ int main(int argc, char** argv)
                             //cout<<"("<<x<<","<<y<<") ";
                             if(depth_mtr(y,x) > 500.f)
                             {
+                                //cout<<"001"<<endl;
                                 square(pixel_counter, 2) = depth_mtr(y,x) / factor;
                                 square(pixel_counter, 0) = (x - cx) * square(pixel_counter, 2) / fx;
                                 square(pixel_counter, 1) = (y - cy) * square(pixel_counter, 2) / fy;
@@ -269,6 +288,7 @@ int main(int argc, char** argv)
 
                     if(pixel_counter < VALID_THRE) 
                     {
+                        //cout<<"004"<<endl;
                         planes_mtr.row(i*square_nh + j) = Vector4f::Zero();
                         central_mtr.row(i*square_nh + j) = Vector3f::Zero();
                         planes_vec_mtr.row(i*square_nh + j) = Vector3f::Zero();
@@ -278,6 +298,7 @@ int main(int argc, char** argv)
                         Vector4f paras;
                         Vector3f plane_vec;
                         Vector3f plane_point;
+                        //cout<<"005"<<endl;
                         planes_mtr.row(i*square_nh + j) = plane_ransac(square, paras, plane_vec, plane_point, pixel_counter);
                         planes_vec_mtr.row(i*square_nh + j) = plane_vec;
                         //central_mtr.row(i*square_nh + j) = square.row(pixel_counter/2);
@@ -342,9 +363,11 @@ int main(int argc, char** argv)
                 {
                     central_mtr(i, 1) = central_mtr(i, 1) * 3;
                     Vector3f direction;
+                    //cout<<"006"<<endl;
                     direction(0) = central_mtr(i,2);
                     direction(1) = -central_mtr(i,0);
                     direction(2) = -central_mtr(i,1);
+                    //cout<<"010"<<endl;
 
                     if(central_mtr(i, 2) > 1.5 && -central_mtr(i, 1) > -current_position(2) + 0.3) //do not count ground
                     {
@@ -356,6 +379,7 @@ int main(int argc, char** argv)
                         if(angle_between_vectors(fly_direction, direction) + angle_between_vectors(control_direction, direction) < theta0 + delt_theta 
                             && transvection(middle_direction, direction) > 0) //obstacle judge
                         {
+                            //cout<<"007"<<endl;
                             float dist = vector_length(direction);
                             if(min_obstacle_dist >  dist && dist > 0.3)
                             {
@@ -367,6 +391,7 @@ int main(int argc, char** argv)
                     }
                     else if(central_mtr(i, 2) > 0.6 && -central_mtr(i, 1) > -current_position(2) + 0.3)//do not count ground and slades 
                     {
+                        //cout<<"008"<<endl;
                         float dist = vector_length(direction);
                         if(min_obstacle_dist >  dist && dist > 0.5)
                         {
@@ -376,6 +401,7 @@ int main(int argc, char** argv)
                     else if(central_mtr(i, 2) > 0.1 && -central_mtr(i, 1) > -current_position(2) + 0.3 
                             && i%square_nh > slade_square_thred && i%square_nw > body_square_min && i%square_nw < body_square_max) //handle slades and body
                     {
+                        //cout<<"009"<<endl;
                         min_obstacle_dist = 0.5;
                     }
 
@@ -386,7 +412,7 @@ int main(int argc, char** argv)
             //cout<<obstacle_direction<<"**"<<endl;
             obstacle_dist_result.data = min_obstacle_dist;
             obstacle_dist_pub.publish(obstacle_dist_result);
-
+            //cout<<"011"<<endl;
 
             //cout<< planes_vec_mtr;
 
@@ -420,10 +446,13 @@ int main(int argc, char** argv)
             }
 
             imshow("disp_img",disp_img);
+            disp_img.release();
             waitKey(40);
         }
         else
             cout<<"Wrong Image!"<<endl;
+
+        //flag = 0;
 
         ros::spinOnce();
         loop_rate.sleep();
