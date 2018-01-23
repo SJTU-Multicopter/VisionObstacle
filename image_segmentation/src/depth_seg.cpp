@@ -26,11 +26,11 @@ using namespace Eigen;
 
 namespace enc = sensor_msgs::image_encodings; 
 
-#define WIDTH 640
+#define WIDTH 480
 #define HEIGHT 360
-#define STEP 10
+#define STEP 8
 #define SQUARE_NUM 9216  //WIDTH*HEIGHT/STEP/STEP
-#define VALID_THRE 10
+#define VALID_THRE 5
 
 Mat dep_frame(WIDTH,HEIGHT,CV_16UC1);
 MatrixXf depth_mtr(HEIGHT, WIDTH);
@@ -408,11 +408,10 @@ void chatterCallback_realsense(const sensor_msgs::Image &msg)
       {
           for(int j=0; j< WIDTH; j++)
           {
-              if(is_nan( temp.at<float>(i,j) ) )
-                  depth_mtr(i,j) = 100.0;
-              else
+              //if(is_nan( temp.at<float>(i,j) ) )
+              //    depth_mtr(i,j) = 100.0;
+              //else
                   depth_mtr(i,j) = (float)temp.at<float>(i,j);// * factor;
-              //cout<<depth_mtr(i,j)<<endl;
           }
       }
 
