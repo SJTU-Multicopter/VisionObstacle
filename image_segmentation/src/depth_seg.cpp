@@ -10,6 +10,7 @@
 #include <Eigen/Geometry>  
 #include <pcl/filters/voxel_grid.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/Image.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_types.h>
 #include <pcl/PCLPointCloud2.h>
@@ -23,9 +24,11 @@ using namespace std;
 using namespace cv;
 using namespace Eigen;
 
+namespace enc = sensor_msgs::image_encodings; 
+
 #define WIDTH 640
 #define HEIGHT 360
-#define STEP 5
+#define STEP 10
 #define SQUARE_NUM 9216  //WIDTH*HEIGHT/STEP/STEP
 #define VALID_THRE 10
 
@@ -44,12 +47,12 @@ bool init_flag = false;
 
 //sensor_msgs::ImagePtr msg;
 
-//camera parameters
-float fx = 205.47;
-float fy = 205.47;
-float cx = 320.5;
-float cy = 180.5;
-float factor = 5000.0;
+//camera parameters, realsense
+float fx = 461.596;
+float fy = 461.596;
+float cx = 245.996;
+float cy = 179.133;
+float factor = 1000.0; //5000.0;
 
 float min_obstacle_dist = 100.0;
 
@@ -115,7 +118,7 @@ Vector4f &plane_ransac(MatrixXf &square, Vector4f &paras, Vector3f &plane_vec, V
             paras = paras_temp;
             plane_point = (square.row(n1) + square.row(n2) + square.row(n3)) / 3;
         }
-        cout << "777"<<endl;
+       // cout << "777"<<endl;
     }
     plane_vec(0) = paras(0); 
     plane_vec(1) = paras(1); 
@@ -373,6 +376,202 @@ void chatterCallback_depth(const sensor_msgs::PointCloud2& cloud_msg)
           }
       }
 
+      //imshow("disp_img",disp_img);
+      disp_img.release();
+      //waitKey(1);
+    }
+}
+
+
+void chatterCallback_realsense(const sensor_msgs::Image &msg)
+{
+    if(init_flag)
+    {
+      /***Read Images**/
+      cv_bridge::CvImagePtr cv_ptr;  
+  
+      try  
+      {  
+          /*转化成CVImage*/  
+          cv_ptr = cv_bridge::toCvCopy(msg, enc::TYPE_32FC1);  
+      }  
+  
+      catch (cv_bridge::Exception& e)  
+      {  
+          ROS_ERROR("cv_bridge exception is %s", e.what());  
+          return;  
+      }  
+
+      Mat temp = cv_ptr->image;
+
+      for(int i = 0; i < HEIGHT; i++)
+      {
+          for(int j=0; j< WIDTH; j++)
+          {
+              if(is_nan( temp.at<float>(i,j) ) )
+                  depth_mtr(i,j) = 100.0;
+              else
+                  depth_mtr(i,j) = (float)temp.at<float>(i,j);// * factor;
+              //cout<<depth_mtr(i,j)<<endl;
+          }
+      }
+
+      /*Process*/
+
+      for(int i = 0; i < square_nw; i++) //divide squares
+      {
+          for(int j = 0; j < square_nh; j++)
+          {
+              int start_x = i*STEP;
+              int start_y = j*STEP;
+              MatrixXf square(STEP*STEP, 3);  //(X,Y,Z) for each pixel, X is rightside, Y is down side and Z is front side(depth).
+              //square = MatrixXf::Zero(STEP*STEP,3);
+              int pixel_counter = 0;
+
+              //cout<<"005"<<endl;
+              for(int x = start_x; x < start_x+STEP; x++)
+              {
+                  for(int y = start_y; y < start_y+STEP; y++)
+                  {
+                      //cout<<"("<<x<<","<<y<<") ";
+                      if(depth_mtr(y,x) > 500.f)  //min dist
+                      {
+                          //cout<<"001"<<endl;
+                          square(pixel_counter, 2) = depth_mtr(y,x) / factor;
+                          square(pixel_counter, 0) = (x - cx) * square(pixel_counter, 2) / fx;
+                          square(pixel_counter, 1) = (y - cy) * square(pixel_counter, 2) / fy;
+                          pixel_counter ++;  //only save valid points!!!!!!!
+                      }
+                  }
+              }
+
+              //cout<<"000"<<endl;
+              if(pixel_counter < VALID_THRE)
+              {
+                  planes_mtr.row(i*square_nh + j) = Vector4f::Zero();
+                  central_mtr.row(i*square_nh + j) = Vector3f::Zero();
+                  planes_vec_mtr.row(i*square_nh + j) = Vector3f::Zero();
+              }
+              else
+              {
+                  Vector4f paras;
+                  Vector3f plane_vec;
+                  Vector3f plane_point;
+                  //cout<<"011"<<endl;
+                  planes_mtr.row(i*square_nh + j) = plane_ransac(square, paras, plane_vec, plane_point, pixel_counter);
+                  //cout<<"023"<<endl;
+                  planes_vec_mtr.row(i*square_nh + j) = plane_vec;
+                  //central_mtr.row(i*square_nh + j) = square.row(pixel_counter/2);
+                  central_mtr.row(i*square_nh + j) = plane_point;
+              }
+              //cout<<"004"<<endl;
+
+          }
+      }
+
+      //cout << "77"<<endl;
+
+      min_obstacle_dist = 100.0;
+      Vector3f obstacle_direction;
+      obstacle_direction(0) = 1;
+      obstacle_direction(1) = 0;
+      obstacle_direction(2) = 0;
+
+      /*Add pose crrection here*/
+      Eigen::Vector3f ea0(current_posture(2), 0.0, current_posture(1));
+      Eigen::Matrix3f R;
+      R = Eigen::AngleAxisf(ea0[0], Eigen::Vector3f::UnitX())
+          * Eigen::AngleAxisf(ea0[1], Eigen::Vector3f::UnitY())
+          * Eigen::AngleAxisf(ea0[2], Eigen::Vector3f::UnitZ());
+
+      central_mtr = (R * central_mtr.transpose()).transpose();
+      planes_vec_mtr = (R * planes_vec_mtr.transpose()).transpose();
+
+      /**Obstcle distance calculation**/
+      if(fly_direction(0) < -0.1)
+      {
+          min_obstacle_dist = 100;
+      }
+      else
+      {
+          for(int i = 0; i < SQUARE_NUM; i++)
+          {
+              central_mtr(i, 1) = central_mtr(i, 1) * 3;
+              Vector3f direction;
+              //cout<<"006"<<endl;
+              direction(0) = central_mtr(i,2);
+              direction(1) = -central_mtr(i,0);
+              direction(2) = -central_mtr(i,1);
+              //cout<<"010"<<endl;
+
+              if(central_mtr(i, 2) > 1.5 && -central_mtr(i, 1) > -current_position(2) + 0.3) //do not count ground
+              {
+
+                  float theta0 = angle_between_vectors(fly_direction, control_direction);
+                  Vector3f middle_direction = (fly_direction + control_direction) / 2.f;
+
+                  float delt_theta = 0.5;
+                  if(angle_between_vectors(fly_direction, direction) + angle_between_vectors(control_direction, direction) < theta0 + delt_theta
+                      && transvection(middle_direction, direction) > 0) //obstacle judge
+                  {
+                      //cout<<"007"<<endl;
+                      float dist = vector_length(direction);
+                      if(min_obstacle_dist >  dist && dist > 0.3)
+                      {
+                          min_obstacle_dist = dist;
+                          obstacle_direction = direction;
+                      }
+
+                  }
+              }
+              else if(central_mtr(i, 2) > 0.6 && -central_mtr(i, 1) > -current_position(2) + 0.3)//do not count ground and slades
+              {
+                  //cout<<"008"<<endl;
+                  float dist = vector_length(direction);
+                  if(min_obstacle_dist >  dist && dist > 0.5)
+                  {
+                      min_obstacle_dist = dist;
+                  }
+              }
+              else if(central_mtr(i, 2) > 0.1 && -central_mtr(i, 1) > -current_position(2) + 0.3
+                      && i%square_nh > slade_square_thred && i%square_nw > body_square_min && i%square_nw < body_square_max) //handle slades and body
+              {
+                  //cout<<"009"<<endl;
+                  min_obstacle_dist = 0.5;
+              }
+
+          }
+      }
+
+      /*display*/
+      Mat disp_img(HEIGHT,WIDTH,CV_8UC3,Scalar(0,0,0));
+      for(int i = 0; i < square_nw; i++) //divide squares
+      {
+          for(int j = 0; j < square_nh; j++)
+          {
+              int start_x = i*STEP;
+              int start_y = j*STEP;
+              float dep_thre_max = 10.0;
+              float dep_thre_min = 0.5;
+              int color = (int) ((dep_thre_max-central_mtr(i*square_nh+j, 2)) / dep_thre_max  * (255 * 3 -200));
+              int red = 0;
+              int green = 0;
+              int blue = 0;
+
+              if (color != (765 - 200))
+              {
+                  if(color > 360) red = color - 360;
+                  if(color > 155 && color < 410) blue = 255 - (color - 155);
+                  if(color > 0 && color < 255) green = 255 - color;
+              }
+
+              rectangle(disp_img, Point(start_x, start_y), Point(start_x+STEP, start_y+STEP), Scalar(blue, green, red), -1, 8);
+              int arrow_x = (int)(planes_vec_mtr(i*square_nh+j, 0) * STEP / 2);
+              int arrow_y = (int)(planes_vec_mtr(i*square_nh+j, 1) * STEP / 2);
+              //drawArrow(disp_img, Point(start_x + STEP/2, start_y + STEP/2), Point(start_x + STEP/2 + arrow_x, start_y + STEP/2 + arrow_y), 2, 30, Scalar(200, 50, 0),1, 4);
+          }
+      }
+
       imshow("disp_img",disp_img);
       disp_img.release();
       waitKey(1);
@@ -396,7 +595,8 @@ int main(int argc, char** argv)
     ros::init(argc, argv, "depth_seg");
     ros::NodeHandle nh;
 
-    ros::Subscriber depth_sub = nh.subscribe("/camera/depth/points", 1, chatterCallback_depth);
+    //ros::Subscriber depth_sub = nh.subscribe("/camera/depth/points", 1, chatterCallback_depth);
+    ros::Subscriber realsense_sub = nh.subscribe("/camera/depth/image_raw",1, chatterCallback_realsense);
     ros::Subscriber local_pose_sub = nh.subscribe("/px4/pose", 1,chatterCallback_pose);
     ros::Subscriber body_vel_sub = nh.subscribe("/px4/body_vel", 1,chatterCallback_body);
     ros::Subscriber ps2_vel_sub = nh.subscribe("/px4/ps2_vel", 1,chatterCallback_ps2);
